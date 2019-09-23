@@ -20,8 +20,6 @@ export default ({ imageUrl, pageUrl, compressed, proxyUrl, disabledHosts, enable
     )
   )
   const skipRegExp = new RegExp(`(${skip.join('|')})`, 'i')
-  
-  console.log(pageUrl, disabledHosts);
 
   return (
     enabled &&

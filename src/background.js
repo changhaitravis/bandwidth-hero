@@ -129,13 +129,16 @@ chrome.storage.local.get(storedState => {
                     // to make sure that the image should be compressed.
                     return axios.head(url, {
                         maxContentLength: 0,
-                        timeout: 60000
+                        timeout: 1000
                     }).then(res => {
                         if (
-                            res.status === 200 &&
+                            [200,206].includes(res.status) &&
                             res.headers['content-length'] > 1024 &&
                             res.headers['content-type'] &&
-                            res.headers['content-type'].startsWith('image')
+                            (res.headers['content-type'].startsWith('image') ||
+                                res.headers['content-type'].startsWith('audio') ||
+                                res.headers['content-type'].startsWith('video')
+                            )
                         ) {
                             return { redirectUrl }
                         }
@@ -194,12 +197,15 @@ chrome.storage.local.get(storedState => {
         }
     }
     function attachListeners(isHttps){
+        let allValidMediaTypes = isFirefox() && isHttps ? 
+            ['imageset', 'image', 'media'/*, 'xmlhttprequest'*/] : 
+            ['image', 'media'/*, 'xmlhttprequest'*/]
         if(!chrome.webRequest.onBeforeRequest.hasListener(onBeforeRequestListener)){
             chrome.webRequest.onBeforeRequest.addListener(
                 onBeforeRequestListener,
                 {
                     urls: ['<all_urls>'],
-                    types: isFirefox() && isHttps ? ['imageset', 'image'] : ['image']
+                    types: allValidMediaTypes
                 },
                 ['blocking']
             )
@@ -209,7 +215,7 @@ chrome.storage.local.get(storedState => {
                 onCompletedListener,
                 {
                     urls: ['<all_urls>'],
-                    types: isFirefox() && isHttps ? ['imageset', 'image'] : ['image']
+                    types: allValidMediaTypes
                 },
                 ['responseHeaders']
             )
