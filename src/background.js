@@ -15,14 +15,19 @@ chrome.storage.local.get(storedState => {
     let compressed = new Set();
     let isWebpSupported
     
+    //Set the HLS bandwidth threshold multiplier. 
+    //(compressionLevel * hlsThreshMultiplier = HLS Bandwidth Cap above which all stream options are removed) 
+    const hlsThreshMultiplier = 8000; //40 * 8,000 = 320,000 (320kbps)
+
     if (/compressor\.bandwidth-hero\.com/i.test(storedState.proxyUrl)) {
         chrome.storage.local.set({ ...storedState, proxyUrl: '' })
     }
-    
+
     setState({ ...defaultState, ...storedState })
-    
+
     checkWebpSupport().then(isSupported => {
         isWebpSupported = isSupported
+        chrome.storage.local.set({ ...storedState, isWebpSupported: isSupported })
     })
     
     const changeHandlers = {
@@ -43,15 +48,15 @@ chrome.storage.local.get(storedState => {
             }
         }
     }
-    
+
     async function checkWebpSupport() {
         if (!self.createImageBitmap) return false
-            
+
             const webpData = 'data:image/webp;base64,UklGRh4AAABXRUJQVlA4TBEAAAAvAAAAAAfQ//73v/+BiOh/AAA='
             const blob = await fetch(webpData).then(r => r.blob())
             return self.createImageBitmap(blob).then(() => true, () => false)
     }
-    
+
     /**
      * Sync state.
      */
@@ -71,7 +76,7 @@ chrome.storage.local.get(storedState => {
         state.enabled ? attachListeners(isHttps(state.proxyUrl)) : detachListeners()
         return true //acknowledge
     }
-    
+
     /**
      * refreshState
      */
@@ -86,7 +91,7 @@ chrome.storage.local.get(storedState => {
             }
         }
     }
-    
+
     function checkSetup() {
         if(state.enabled){
             attachListeners(isHttps(state.proxyUrl))
@@ -99,7 +104,7 @@ chrome.storage.local.get(storedState => {
             }
         }
     }
-    
+
     /**
      * Intercept image loading request and decide if we need to compress it.
      */
@@ -118,39 +123,39 @@ chrome.storage.local.get(storedState => {
             compressed.add(url)
             let redirectUrl = `${state.proxyUrl}?url=${encodeURIComponent(url)}`
             if (!isWebpSupported) redirectUrl += '&jpeg=1'
-                if (!state.convertBw) redirectUrl += '&bw=0'
-                    if (state.compressionLevel) {
-                        redirectUrl += '&l=' + parseInt(state.compressionLevel, 10)
-                    }
-                    if (!isFirefox()) return { redirectUrl }
-                    // Firefox allows onBeforeRequest event listener to return a Promise
-                    // and perform redirect when this Promise is resolved.
-                    // This allows us to run HEAD request before redirecting to compression
-                    // to make sure that the image should be compressed.
-                    return axios.head(url, {
-                        maxContentLength: 0,
-                        timeout: 1000
-                    }).then(res => {
-                        if (
-                            [200,206].includes(res.status) &&
-                            res.headers['content-length'] > 1024 &&
-                            res.headers['content-type'] &&
-                            (res.headers['content-type'].startsWith('image') ||
-                                res.headers['content-type'].startsWith('audio') ||
-                                res.headers['content-type'].startsWith('video')
-                            )
-                        ) {
-                            return { redirectUrl }
-                        }
-                    }).catch(error => {
-                        if(error.response.status === 405)//HEAD method not allowed
-                        {
-                            return { redirectUrl }
-                        }
-                    })
+            if (!state.convertBw) redirectUrl += '&bw=0'
+            if (state.compressionLevel) {
+                redirectUrl += '&l=' + parseInt(state.compressionLevel, 10)
+            }
+            if (!isFirefox()) return { redirectUrl }
+            // Firefox allows onBeforeRequest event listener to return a Promise
+            // and perform redirect when this Promise is resolved.
+            // This allows us to run HEAD request before redirecting to compression
+            // to make sure that the image should be compressed.
+            return axios.head(url, {
+                maxContentLength: 0,
+                timeout: 60000
+            }).then(res => {
+                if (
+                    [200,206].includes(res.status) &&
+                    res.headers['content-length'] > 1024 &&
+                    res.headers['content-type'] &&
+                    (res.headers['content-type'].startsWith('image') ||
+                    res.headers['content-type'].startsWith('audio') ||
+                    res.headers['content-type'].startsWith('video')
+                    )
+                ) {
+                    return { redirectUrl }
+                }
+            }).catch(error => {
+                if(error.response.status === 405)//HEAD method not allowed
+                {
+                    return { redirectUrl }
+                }
+            })
         }
     }
-    
+
     /**
      * Firefox user agent always has "rv:" and "Gecko"
      * https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/User-Agent/Firefox
@@ -158,27 +163,112 @@ chrome.storage.local.get(storedState => {
     function isFirefox() {
         return /rv\:.*Gecko/.test(window.navigator.userAgent)
     }
-    
+
     /**
      * Retrieve saved bytes info from response headers, update statistics in
      * app storage and notify UI about state changes.
      */
-    function onCompletedListener({ responseHeaders }) {
+    function onCompletedListener({ responseHeaders, fromCache }) {
         const bytesSaved = getHeaderValue(responseHeaders, 'x-bytes-saved')
         const bytesProcessed = getHeaderValue(responseHeaders, 'x-original-size')
-        if (bytesSaved !== false && bytesProcessed !== false) {
+        if (bytesSaved !== false && bytesProcessed !== false && fromCache === false) {
             state.statistics.filesProcessed += 1
             state.statistics.bytesProcessed += bytesProcessed
             state.statistics.bytesSaved += bytesSaved
-            
+
             storage.set({statistics : state.statistics})
         }
     }
     
+    function HLSListener({ url, documentUrl, requestId }) {
+        if(!isFirefox() || url.split(/\#|\?/)[0].split('.').pop().trim().toLowerCase() !== 'm3u8') { 
+            return {} 
+        }
+        
+        checkSetup()
+        if (
+            shouldCompress({
+                imageUrl: url,
+                pageUrl: pageUrl || parseUrl(documentUrl).host, //occasionally pageUrl is not ready in time on FF
+                    compressed,
+                    proxyUrl: state.proxyUrl,
+                    disabledHosts: state.disabledHosts,
+                    enabled: state.enabled
+            })
+        ) {
+            compressed.add(url)
+            
+            let filter =  chrome.webRequest.filterResponseData(requestId)
+            
+            let decoder = new TextDecoder("utf-8")
+            let encoder = new TextEncoder()
+                
+            filter.ondata = event => {
+                let str = decoder.decode(event.data, {stream: true})
+                // Just change any instance of Example in the HTTP response
+                // to WebExtension Example.
+                //str = str.replace(/Example/g, 'WebExtension Example')
+                
+                let strArr = str.split('\n')
+                
+                let lowestBandwidthMem, 
+                bandwidthRegex = /BANDWIDTH=(\d+)/i,
+                bandwidthTarget = hlsThreshMultiplier * parseInt(state.compressionLevel)
+                
+                let hlsStreamList = false;
+                for(let line in strArr){
+                    let workingLine = strArr[line]
+                    if(workingLine.startsWith('#EXT-X-STREAM-INF')){
+                        hlsStreamList = true
+                        let bandwidthMatch = workingLine.match(bandwidthRegex)
+                        let bandwidth = parseInt(bandwidthMatch ? bandwidthMatch[1] : 0);
+                        if(bandwidth >= bandwidthTarget ){
+                           //remove this and next line
+                            let current = strArr.splice(line, 2, `#REMOVED BY BANDWIDTH HERO:BANDWIDTH=${bandwidth}`)
+                            if(!lowestBandwidthMem || bandwidth < lowestBandwidthMem.bandwidth ){
+                                lowestBandwidthMem = { "bandwidth": bandwidth, "lines": current }
+                            }else if(lowestBandwidthMem && bandwidth === lowestBandwidthMem.bandwidth){
+                                lowestBandwidthMem.lines = lowestBandwidthMem.lines.concat(current)
+                            }
+                        }
+                    }
+//                     if (!workingLine.startsWith('#')  && workingLine.split(/\#|\?/)[0].split('.').pop().trim().toLowerCase() !== 'm3u8'){
+//                         if(!workingLine.toLowerCase().startsWith('http'))
+//                         {
+//                             let baseUrl = url.split('/')
+//                             if(workingLine.startsWith('/')){
+//                                 baseUrl = baseUrl.slice(0,3)
+//                             }else{ 
+//                                 baseUrl.pop()
+//                                 workingLine = '/' + workingLine;
+//                             }
+//                             workingLine = `${baseUrl.join('/')}${workingLine}`
+//                         }
+//                         let redirectUrl = `${state.proxyUrl}?url=${encodeURIComponent(workingLine)}`
+//                         if (state.compressionLevel) {
+//                             redirectUrl += '&l=' + parseInt(state.compressionLevel, 10)
+//                         }
+//                         strArr[line] = redirectUrl;
+//                     }
+                }
+                if(lowestBandwidthMem && lowestBandwidthMem.bandwidth > bandwidthTarget){
+                    strArr = strArr.concat(lowestBandwidthMem.lines)
+                }
+                
+                str = strArr.join('\n')
+                            
+                if(hlsStreamList){console.log(str)}
+                filter.write(encoder.encode(str))
+                filter.disconnect()
+            }
+        }
+        return {}
+    }
+
     function tabActivationListener({tabId}) {
         chrome.tabs.get(tabId, tab => (pageUrl = parseUrl(tab.url).hostname))
     }
-    
+
     function tabUpdateListener(){
         if(compressed instanceof Set){
             compressed.clear()
@@ -186,7 +276,7 @@ chrome.storage.local.get(storedState => {
             compressed = new Set()
         }
     }
-    
+
     /**
      * Patch document's content security policy headers so that it will allow
      * images loading from our compression proxy URL.
@@ -198,8 +288,8 @@ chrome.storage.local.get(storedState => {
     }
     function attachListeners(isHttps){
         let allValidMediaTypes = isFirefox() && isHttps ? 
-            ['imageset', 'image', 'media'/*, 'xmlhttprequest'*/] : 
-            ['image', 'media'/*, 'xmlhttprequest'*/]
+            ['imageset', 'image', 'media'] : 
+            ['image', 'media']
         if(!chrome.webRequest.onBeforeRequest.hasListener(onBeforeRequestListener)){
             chrome.webRequest.onBeforeRequest.addListener(
                 onBeforeRequestListener,
@@ -230,6 +320,13 @@ chrome.storage.local.get(storedState => {
                 ['blocking', 'responseHeaders']
             )
         }
+        if(isFirefox() && !chrome.webRequest.onBeforeRequest.hasListener(HLSListener)){
+            chrome.webRequest.onBeforeRequest.addListener(
+                HLSListener,
+                {urls: ['<all_urls>'], types: ['xmlhttprequest']},
+                ["blocking"]
+            );
+        }
         if(!chrome.tabs.onActivated.hasListener(tabActivationListener)){
             chrome.tabs.onActivated.addListener(tabActivationListener)
         }
@@ -237,15 +334,16 @@ chrome.storage.local.get(storedState => {
             chrome.tabs.onUpdated.addListener(tabUpdateListener)
         }
     }
-    
+
     function detachListeners(){
         chrome.webRequest.onBeforeRequest.removeListener(onBeforeRequestListener)
         chrome.webRequest.onCompleted.removeListener(onCompletedListener)
         chrome.webRequest.onHeadersReceived.removeListener(onHeadersReceivedListener)
+        chrome.webRequest.onBeforeRequest.removeListener(HLSListener)
         chrome.tabs.onActivated.removeListener(tabActivationListener)
         chrome.tabs.onUpdated.removeListener(tabUpdateListener)
     }
-    
+
     if(!chrome.storage.onChanged.hasListener(updateState)){
         chrome.storage.onChanged.addListener(updateState)
     }
