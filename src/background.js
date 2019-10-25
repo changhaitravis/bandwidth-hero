@@ -2,6 +2,7 @@ import shouldCompress from './background/shouldCompress'
 import patchContentSecurity from './background/patchContentSecurity'
 import isHttps from './background/isHttps'
 import getHeaderValue from './background/getHeaderIntValue'
+import filterHLS from './background/filterHLS'
 import parseUrl from './utils/parseUrl'
 import deferredStateStorage from './utils/deferredStateStorage'
 import defaultState from './defaults'
@@ -181,7 +182,7 @@ chrome.storage.local.get(storedState => {
     }
     
     function HLSListener({ url, documentUrl, requestId }) {
-        if(!isFirefox() || url.split(/\#|\?/)[0].split('.').pop().trim().toLowerCase() !== 'm3u8') { 
+        if(!isFirefox() || !requestId || url.split(/\#|\?/)[0].split('.').pop().trim().toLowerCase() !== 'm3u8') { 
             return {} 
         }
         
@@ -195,73 +196,14 @@ chrome.storage.local.get(storedState => {
                     disabledHosts: state.disabledHosts,
                     enabled: state.enabled
             })
-        ) {
-            compressed.add(url)
-            
-            let filter =  chrome.webRequest.filterResponseData(requestId)
-            
-            let decoder = new TextDecoder("utf-8")
-            let encoder = new TextEncoder()
+            ){
+                compressed.add(url)
                 
-            filter.ondata = event => {
-                let str = decoder.decode(event.data, {stream: true})
-                // Just change any instance of Example in the HTTP response
-                // to WebExtension Example.
-                //str = str.replace(/Example/g, 'WebExtension Example')
-                
-                let strArr = str.split('\n')
-                
-                let lowestBandwidthMem, 
-                bandwidthRegex = /BANDWIDTH=(\d+)/i,
-                bandwidthTarget = hlsThreshMultiplier * parseInt(state.compressionLevel)
-                
-                let hlsStreamList = false;
-                for(let line in strArr){
-                    let workingLine = strArr[line]
-                    if(workingLine.startsWith('#EXT-X-STREAM-INF')){
-                        hlsStreamList = true
-                        let bandwidthMatch = workingLine.match(bandwidthRegex)
-                        let bandwidth = parseInt(bandwidthMatch ? bandwidthMatch[1] : 0);
-                        if(bandwidth >= bandwidthTarget ){
-                           //remove this and next line
-                            let current = strArr.splice(line, 2, `#REMOVED BY BANDWIDTH HERO:BANDWIDTH=${bandwidth}`)
-                            if(!lowestBandwidthMem || bandwidth < lowestBandwidthMem.bandwidth ){
-                                lowestBandwidthMem = { "bandwidth": bandwidth, "lines": current }
-                            }else if(lowestBandwidthMem && bandwidth === lowestBandwidthMem.bandwidth){
-                                lowestBandwidthMem.lines = lowestBandwidthMem.lines.concat(current)
-                            }
-                        }
-                    }
-//                     if (!workingLine.startsWith('#')  && workingLine.split(/\#|\?/)[0].split('.').pop().trim().toLowerCase() !== 'm3u8'){
-//                         if(!workingLine.toLowerCase().startsWith('http'))
-//                         {
-//                             let baseUrl = url.split('/')
-//                             if(workingLine.startsWith('/')){
-//                                 baseUrl = baseUrl.slice(0,3)
-//                             }else{ 
-//                                 baseUrl.pop()
-//                                 workingLine = '/' + workingLine;
-//                             }
-//                             workingLine = `${baseUrl.join('/')}${workingLine}`
-//                         }
-//                         let redirectUrl = `${state.proxyUrl}?url=${encodeURIComponent(workingLine)}`
-//                         if (state.compressionLevel) {
-//                             redirectUrl += '&l=' + parseInt(state.compressionLevel, 10)
-//                         }
-//                         strArr[line] = redirectUrl;
-//                     }
-                }
-                if(lowestBandwidthMem && lowestBandwidthMem.bandwidth > bandwidthTarget){
-                    strArr = strArr.concat(lowestBandwidthMem.lines)
-                }
-                
-                str = strArr.join('\n')
-                            
-                if(hlsStreamList){console.log(str)}
-                filter.write(encoder.encode(str))
-                filter.disconnect()
+                filterHLS(
+                    chrome.webRequest.filterResponseData(requestId),
+                    hlsThreshMultiplier * parseInt(state.compressionLevel)
+                )
             }
-        }
         return {}
     }
 
