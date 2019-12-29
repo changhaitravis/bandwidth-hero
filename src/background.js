@@ -201,7 +201,7 @@ chrome.storage.local.get(storedState => {
                 
                 filterHLS(
                     chrome.webRequest.filterResponseData(requestId),
-                    hlsThreshMultiplier * parseInt(state.compressionLevel)
+                    parseInt(state.compressionLevel)
                 )
             }
         return {}

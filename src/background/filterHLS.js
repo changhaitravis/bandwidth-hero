@@ -3,18 +3,18 @@ export default (filter, bandwidthTarget) => {
     let encoder = new TextEncoder()
     
     filter.onstart = event => {
-        console.log("started HLS playlist manifest filter");
+        console.log("started HLS playlist manifest filter")
     }
     
     let data = []
     
     filter.ondata = event => {
-        console.log("HLS Data event fired");
+        console.log("HLS Data event fired")
         data.push(event.data)
     }
     
     filter.onerror = event => {
-        console.error(`Error: ${filter.error} | Status: ${filter.status}`);
+        console.error(`Error: ${filter.error} | Status: ${filter.status}`)
         filter.disconnect()
     }
     
@@ -23,18 +23,18 @@ export default (filter, bandwidthTarget) => {
         
         let str = "";
         if (data.length == 1) {
-            str = decoder.decode(data[0]);
+            str = decoder.decode(data[0])
         }
         else {
             for (let i = 0; i < data.length; i++) {
-                let stream = (i == data.length - 1) ? false : true;
-                str += decoder.decode(data[i], {stream});
+                let stream = (i == data.length - 1) ? false : true
+                str += decoder.decode(data[i], {stream})
             }
         }
         
         let strArr = str.split('\n')
         
-        let lowestBandwidthMem, 
+        let streams = {}, 
         bandwidthRegex = /BANDWIDTH=(\d+)/i
         
         let hlsStreamList = false
@@ -43,23 +43,21 @@ export default (filter, bandwidthTarget) => {
             if(workingLine.startsWith('#EXT-X-STREAM-INF')){
                 hlsStreamList = true
                 let bandwidthMatch = workingLine.match(bandwidthRegex)
-                let bandwidth = parseInt(bandwidthMatch ? bandwidthMatch[1] : 0);
-                if(bandwidth >= bandwidthTarget ){
-                    //remove this and next line
-                    let current = strArr.splice(line, 2, `#REMOVED BY BANDWIDTH HERO:BANDWIDTH=${bandwidth}`)
-                    if(!lowestBandwidthMem || bandwidth < lowestBandwidthMem.bandwidth ){
-                        lowestBandwidthMem = { "bandwidth": bandwidth, "lines": current }
-                    }else if(lowestBandwidthMem && bandwidth === lowestBandwidthMem.bandwidth){
-                        lowestBandwidthMem.lines = lowestBandwidthMem.lines.concat(current)
-                    }
-                }
+                let bandwidth = parseInt(bandwidthMatch ? bandwidthMatch[1] : 0)
+                //remove this and next line. Replace with null to maintain position in loop.
+                let current = strArr.splice(line, 2, null)
+                streams[bandwidth] instanceof Array ? streams[bandwidth].concat(current) : streams[bandwidth] = current;
             } 
         }
-        
-        if(lowestBandwidthMem && lowestBandwidthMem.bandwidth > bandwidthTarget){
-            strArr = strArr.concat(lowestBandwidthMem.lines)
-        }
-        
+        var bandwidthsList = 
+            Object.keys(streams)
+                    .sort((a, b) => a - b)
+                    .slice(0, 
+                           Math.floor(
+                               streams.length / 5 * (100 / (100 - bandwidthTarget)) 
+                           ) || 1
+                          )
+        strArr.splice(strArr.indexOf(null), streams.length , ...bandwidthsList.map(bandwidth => streams[bandwidth]).flat())
         str = strArr.join('\n')
         
         if(hlsStreamList){console.log(str)}
